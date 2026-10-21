@@ -1,0 +1,241 @@
+# Deploy an Edge Function, from here rather than from somebody's laptop.
+#
+# `supabase/DEPLOY.md` used to end every function with "run this on your
+# machine", which is fine until the machine is a phone. This is the same
+# command with a button on it: Actions → Deploy Edge Functions → Run workflow.
+#
+# It needs one secret, `SUPABASE_ACCESS_TOKEN` — a personal access token from
+# supabase.com/dashboard/account/tokens, added under Settings → Secrets and
+# variables → Actions. It is not a project key and not the service key: it is
+# an account credential that can deploy, so it belongs in a secret and nowhere
+# else. Without it this workflow says so and stops, rather than failing main
+# with a stack trace about being logged out.
+#
+# Nothing here touches the app or the database. A function is code; the tables
+# it reads are applied separately, by hand, from the SQL in `supabase/`.
+
+name: Deploy Edge Functions
+
+# Only what CI has passed reaches the project.
+#
+# This used to be `on: push: branches: ['main']`, and `pages.yml` carries the
+# argument for why that is wrong at length — two workflows watching one event,
+# neither aware of the other, so a commit that failed `tsc`, failed the suite
+# or failed the policy checks deployed anyway, at the same moment CI was going
+# red about it.
+#
+# That argument was made about the app and acted on only there. The functions
+# kept the ungated trigger for as long as the gate has existed, which is the
+# more surprising half of the two: **an Edge Function is the half with the
+# service-role key in it.** `claude` meters the AI spend, `fetchcal` serves a
+# calendar by token past row-level security, `push` is the sender, and the
+# invite gate is a `security definer` function these sit in front of. A broken
+# one of those is not a page drawing wrong, and it was the one deploying
+# unverified.
+#
+# So the same gate, written the same way. The cost is that a function now waits
+# for the CI run — nine or ten minutes rather than going live on the merge —
+# and that is the right trade for the half of the deploy that can read
+# somebody else's coursework.
+#
+# Two consequences of `workflow_run` worth knowing, both handled below:
+#
+#   1. **It takes no `paths:` filter**, so this fires on every CI run that
+#      passes on main rather than only on the ones touching a function. The
+#      `what` step already answers "which functions changed" from the diff and
+#      already deploys nothing when the answer is none, so the extra runs are a
+#      checkout and two shell steps that print "Nothing to deploy". No npm and
+#      no CLI: `setup-cli` and `Deploy` are both conditional on the list being
+#      non-empty, and were before this change.
+#   2. **It checks out the default branch head by default**, not the commit
+#      that passed. `head_sha` below pins it, the same as `pages.yml` — and
+#      here it matters twice over, because the diff that decides *what* to
+#      deploy is taken against `HEAD^` and would otherwise be a diff of
+#      somebody else's merge.
+#
+# `workflow_dispatch` is unchanged: it still deploys whatever is on main, names
+# its own functions, and is how a function first goes up. It is also the escape
+# hatch for deploying past a red CI when somebody has decided to.
+on:
+  workflow_run:
+    workflows: ['CI']
+    types: [completed]
+    branches: ['main']
+  # Or by hand, which is how a function first goes up.
+  workflow_dispatch:
+    inputs:
+      functions:
+        description: 'Which functions to deploy, space-separated'
+        required: true
+        default: 'fetchcal'
+        type: string
+
+# Deploys are not worth racing. Never cancel one half-way: the platform is
+# mid-swap of a live function and the loser leaves it undefined.
+concurrency:
+  group: functions
+  cancel-in-progress: false
+
+# The job token may read the repository and nothing else, unless a job says
+# otherwise below. Without this line every job gets the repository's default
+# token, which a Settings change can make read-write, and a compromised Action
+# or dependency runs with whatever that is. `supplychain.test.ts` requires
+# every workflow to declare this.
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # A completed CI run that failed still fires `workflow_run`, so the
+    # conclusion is checked rather than the event. A hand-started deploy
+    # carries no `workflow_run` at all, hence the first clause. Identical to
+    # `pages.yml`'s, deliberately: two deploys with two different ideas of
+    # "passing" is most of what this change is about.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The commit CI passed, not whatever main has drifted to since —
+          # which on this repository is a real distance: five merges landed
+          # inside two minutes on the afternoon this was written. Empty on a
+          # `workflow_dispatch`, which checks out the default branch, and that
+          # is the intended behaviour for a hand-started deploy.
+          ref: ${{ github.event.workflow_run.head_sha }}
+          # Two commits, so the merge can be asked which functions it changed.
+          fetch-depth: 2
+
+      # Which project. A repository variable wins; otherwise the ref is read
+      # off the URL the app is built against, so a fork that set its own
+      # `VITE_SUPABASE_URL` deploys to its own project rather than to this one.
+      - name: Work out the project
+        id: project
+        env:
+          REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          URL: ${{ vars.VITE_SUPABASE_URL }}
+        run: |
+          ref="$REF"
+          if [ -z "$ref" ]; then
+            url="$URL"
+            # The committed default, which is what the deployed app uses.
+            [ -z "$url" ] && url=$(grep -E '^VITE_SUPABASE_URL=' app/.env.production | cut -d= -f2-)
+            ref=$(printf '%s' "$url" | sed -E 's#https?://##; s#\..*##')
+          fi
+          if [ -z "$ref" ]; then
+            echo "::error title=No project::Set the SUPABASE_PROJECT_REF repository variable, or VITE_SUPABASE_URL."
+            exit 1
+          fi
+          echo "::notice title=Project::Deploying to $ref."
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      # Which functions. Named by hand on a dispatch; otherwise whichever
+      # directories the merge actually touched — so a change to `fetchcal` does
+      # not redeploy `claude` and `push` for no reason, and a CI run that
+      # touched no function at all deploys nothing.
+      #
+      # `HEAD^ HEAD` reads the same under `workflow_run` as it did under
+      # `push`: `HEAD` is the merge commit and `HEAD^` is its first parent,
+      # which is the previous state of main either way.
+      - name: Work out what to deploy
+        id: what
+        env:
+          ASKED: ${{ inputs.functions }}
+        run: |
+          if [ -n "$ASKED" ]; then
+            list="$ASKED"
+          else
+            list=$(git diff --name-only HEAD^ HEAD -- supabase/functions \
+              | cut -d/ -f3 | sort -u | tr '\n' ' ')
+            # `_shared/` is not a function; it is imported by several, and the
+            # CLI bundles it into each at deploy time. So a change there must
+            # redeploy every function that imports it — and must not be passed
+            # on as a name, because the existence check below would fail on it.
+            #
+            # This is the half that is easy to leave out: with `_shared` merely
+            # skipped, a fix to shared code would report "deployed" having
+            # redeployed nothing, and the functions would keep running the old
+            # copy. Dependents are found by asking which functions import it
+            # rather than by a list here, so a fourth one cannot go missing.
+            case " $list " in
+              *" _shared "*)
+                list=$(printf '%s' "$list" | tr ' ' '\n' | grep -v '^_shared$' || true)
+                deps=$(grep -rl "_shared/" supabase/functions --include=index.ts \
+                  | cut -d/ -f3 | sort -u)
+                list=$(printf '%s\n%s\n' "$list" "$deps" | sed '/^$/d' | sort -u | tr '\n' ' ')
+                echo "::notice title=Shared code::_shared changed, so every function importing it is redeployed."
+                ;;
+            esac
+          fi
+          list=$(printf '%s' "$list" | tr -s ' ' | sed 's/^ //; s/ $//')
+          if [ -z "$list" ]; then
+            echo "::notice title=Nothing to deploy::No function directory changed."
+          else
+            echo "::notice title=Functions::$list"
+          fi
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359 # v3
+        if: steps.what.outputs.list != ''
+        with:
+          version: latest
+
+      # A later merge can finish CI first. Re-check main immediately before
+      # the mutation so an older passing run cannot overwrite newer function
+      # code merely because its slower CI completed last. A hand-started run
+      # deliberately remains the documented override.
+      - name: Refuse a stale release
+        id: current
+        env:
+          PASSED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          if [ -z "$PASSED_SHA" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          current=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$current" = "$PASSED_SHA" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Stale release::CI passed $PASSED_SHA, but main is now $current. The newer functions stay live; this run will not replace them."
+          fi
+
+      - name: Deploy
+        if: steps.what.outputs.list != '' && steps.current.outputs.deploy == 'true'
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          REF: ${{ steps.project.outputs.ref }}
+          LIST: ${{ steps.what.outputs.list }}
+        run: |
+          if [ -z "$SUPABASE_ACCESS_TOKEN" ]; then
+            echo "::warning title=Not deployed::No SUPABASE_ACCESS_TOKEN secret, so nothing was deployed. Add one from supabase.com/dashboard/account/tokens under Settings → Secrets and variables → Actions, then run this workflow again."
+            exit 0
+          fi
+          # `--no-verify-jwt` on every one of these, and on every one of them it
+          # is the platform check that is off rather than authentication:
+          # `claude`, `fetchcal` and `canvas` verify the caller's token
+          # themselves and have to answer a CORS preflight, which carries no
+          # Authorization header at all; `push` is called by the scheduler and
+          # authenticates with a shared secret. See supabase/DEPLOY.md.
+          #
+          # `lti` is the first one here with no Supabase caller at all, and it
+          # is the one to read the flag carefully on. Brightspace redirects a
+          # student's browser to it, and a browser arriving from an LMS has no
+          # Supabase session to carry. What authenticates a launch is the
+          # platform's own signed id_token, checked against the keys it
+          # publishes and then against the registration a school installed —
+          # `supabase/functions/_shared/lti.ts` is that check and
+          # `app/src/lib/lti.test.ts` walks it. Stronger than the flag that is
+          # off, and not a substitute for it.
+          for fn in $LIST; do
+            if [ ! -f "supabase/functions/$fn/index.ts" ]; then
+              echo "::error title=No such function::supabase/functions/$fn/index.ts does not exist."
+              exit 1
+            fi
+            echo "::group::$fn"
+            supabase functions deploy "$fn" --project-ref "$REF" --no-verify-jwt
+            echo "::endgroup::"
+          done

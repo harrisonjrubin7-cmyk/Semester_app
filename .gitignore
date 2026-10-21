@@ -1,0 +1,96 @@
+# Dependencies and build caches at the repo root.
+#
+# `app/` has had its own .gitignore since the beginning; the root had none, so
+# a stray `npx --prefix app` run from here wrote a vitest results cache into a
+# root node_modules and git tracked it. That one file then turned up as an
+# uncommitted change after every test run, for the rest of time.
+node_modules/
+.vite/
+.ui-review/
+
+# Runner-mounted design reference. It is untrusted evidence, not repository source.
+.semester-reference/
+
+# Python, for the pipeline.
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local secrets. .env.example is committed; nothing else is.
+.env
+.env.local
+.env.*.local
+
+.DS_Store
+*.log
+
+# Scratch the Supabase CLI writes when it runs.
+supabase/.temp/
+
+# Rendered lesson video.
+#
+# The MP3s beside these are committed — they are the product, 46MB for four
+# courses, and every student streams the same file. The MP4s are not: they are
+# derived from those MP3s plus the cue list, re-rendered by
+# `pipeline/lessons.py <course> --remotion` whenever they are wanted, and a
+# single 1080p unit is larger than the entire audio library. See
+# video/README.md.
+app/public/audio/lessons/**/*.mp4
+
+# And the shorts, for the same reason and more so: one per flashcard is 278
+# files across the four courses.
+app/public/audio/shorts/
+
+# And the documentary cuts, which are 28 minutes each.
+app/public/audio/documentary/
+
+# And the character-sheet layouts. Both files here are derived from
+# `pipeline/personas.mjs` — the spec by `persona-sheet.mjs`, the picture from
+# the spec — and re-drawn by `node pipeline/persona-sheet.mjs --all --layout`
+# in a few seconds. Committing them would be committing the preset twice, and
+# the second copy is the one that goes stale.
+app/public/video/personas/
+
+# And the B-roll. Generated clips are bought from a provider, not built from
+# anything in this repository, so they are neither derived nor source — and
+# `video/shots/<course>.json`, which *is* committed, says exactly what each
+# one was asked to be.
+app/public/video/broll/
+
+# And the explainers, which are 8–15 minutes each. The chapters.txt beside
+# them is derived from the same plan and re-written every render.
+app/public/video/explainer/
+
+# Terraform: providers and local state are never committed. `.terraform.lock.hcl`
+# is — it pins the provider hashes, which is the supply-chain control.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+plan.bin
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+
+# Visual-regression screenshots and the runner's own baseline (scripts/gallery-shots.mjs)
+.gallery/
+# Generated design-system reports (uploaded as CI artifacts, not committed)
+app/reports/
+
+# Auto-saved session checkpoint (regenerated on every stop; not source)
+# Local memory-tool snapshot
+.anchor/
+
+# Local Claude Code and tooling config, not shared with the repository
+.claude/CLAUDE.md
+.claude/settings.json
+.claudeignore
+
+# Local tool caches written by the md-linker plugin.
+.md-linker/
+
+# Course Engine browser evidence is uploaded by CI, not committed.
+course-engine/apps/web/playwright-report/
+course-engine/apps/web/test-results/

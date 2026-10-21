@@ -1,0 +1,166 @@
+# What is validated, and what is not — September 2026
+
+Written for the deck, and for the question that follows every claim in it.
+
+The market analysis this repository filed as [`MARKET-POSITION.md`](MARKET-POSITION.md)
+ends on an investor recommendation: *"Add a 'what we've validated / what we
+haven't' section to the deck. Investors trust an honest gap more than a polished
+projection built on zero real users."* This is that section, and it is kept here
+rather than only in the deck for the same reason every other figure in this
+repository is: **a number in a slide cannot be re-checked, and a number with a
+command under it can.**
+
+## How to read this
+
+Everything in the left column was re-measured on **`006d24b`, 4 October 2026**
+(first measured on `1c305ee`, 21 September, whose values are kept beside the new
+ones so the drift is visible), with the command beside it. Everything in the right column has **no evidence in
+this repository or anywhere else**, and saying so is the point of the document.
+
+**Every figure carries a commit, because these move.** The test count alone took
+six values in one afternoon — 11,236 → 11,265 → 11,414 → 11,648 → 11,788 → 12,046 — and 20,932 by 4 October; the
+number of files the RLS suite lives in went 13 → 14 → 17 → 19 in a few hours. A figure without a commit beside it is not a fact about the product,
+it is a fact about the afternoon somebody wrote the slide.
+
+---
+
+## Validated — there is evidence, and you can re-run it
+
+| Claim | Evidence | Re-check with |
+| --- | --- | --- |
+| **The product is built and runs** | 20,932 tests passing across 1,326 files, 48 skipped, 0 failing (21 Sept: 12,046 across 615, 10 skipped) | `cd app && npm test` |
+| **The tests do not depend on each other** | The same suite passes in a randomised order (seed 1791130996145; 21 Sept: 1790028722879), which is a different fault from a broken test and a real one. A green shuffle is weak evidence about the timing class of failure (a React root left mounted), which a seed does not reproduce; `src/rootunmount.test.ts` is the guard for that | `npm run test:shuffle` |
+| **It compiles and ships** | Typecheck, lint (including style and accessible-label audits) and production build all exit 0 on `006d24b` | `cd app && npx tsc -b`, `npm run lint`, `npm run build` |
+| **Row-level security is enforced and checked** | 537 `create policy` statements (21 Sept: 93); **107 `.check.sql` suites** (21 Sept: 19) holding 661 `raise notice 'ok …'` pass markers, which create real users and assert a stranger can neither read nor write, then roll back. The 21 September figure of 241 assertions has no recorded counting method and `1c305ee` is not in this clone, so 661 is **not comparable** to it. The suites run in CI against a throwaway Postgres (`ci.yml`, step "Check the database policies"); they were not run locally for this re-measurement | `grep -c 'create policy' supabase/migrations/*` (sum the lines); `ls supabase/*.check.sql \| wc -l`; `cat supabase/*.check.sql \| grep -c "raise notice 'ok"` |
+| **The schema can be rebuilt from the repository** | 174 migrations (21 Sept: 37), **none empty**; migrations applied to production outside the repo are recorded byte-for-byte in `supabase/history/`, which holds 14 `.sql` files today. The 21 September row said 15; that directory's own README says ten were read out of production on 21 September, so the earlier figure does not match it and the count is not carried forward | `find supabase/migrations -name '*.sql' -empty`; `ls supabase/history/*.sql \| wc -l` |
+| **Every commit is gated** | `ci.yml` runs on every pull request and push, with three gating jobs (`build`, `account-sync`, `secrets`) and a notification job. `build` has 24 steps, among them typecheck, lint, university typecheck, video typecheck, the suite, the suite in other timezones and in a different order, performance budgets, accessibility journeys, the database policy checks, and a backup-and-restore rehearsal (21 Sept: six checks). Other workflows (company-site build, HawkScan) run beside it | `.github/workflows/ci.yml` |
+| **The instrument for the missing number is already built** | `ANALYTICS.md` defines activation, weekly active use and **30-day retention**, with the SQL for each; `lib/activity.ts` and `supabase/migrations/20260921151000_activity.sql` implement them. One table, three marks, no screen names or titles or counts | `cat ANALYTICS.md` |
+| **The engineering culture is real, not claimed** | Structural guards catch defects that runtime probes miss — during this review two of them caught errors in work being written *for* this review, and a third caught a broken citation on `main` | `app/src/lib/migrationcitations.test.ts` |
+
+### The differentiating features exist and are reachable
+
+Not roadmap. Each is a module you can open:
+
+- **Cross-course concept linking** — `lib/meet.ts`. Finds the same term defined
+  in two courses and shows **both definitions** rather than asserting they are
+  the same thing. String matching over glossaries, no model, and the screen says
+  so.
+- **What-If grade simulation** — `lib/whatif.ts`, `components/Suppose.tsx`.
+- **Workload fitting against real hours** — with a sleep floor.
+- **Multi-LMS, and outside an LMS entirely** — `lib/feedlink.ts` (any calendar
+  feed), `lib/canvas.ts` (Canvas via a student-issued token),
+  `supabase/functions/lti/` (Brightspace LTI 1.3 launch), plus syllabus PDFs
+  that never touch an LMS.
+- **Hands-free voice** — `lib/voiceloop.ts`, a four-phase loop with the
+  self-hearing echo hazard handled as a state machine rather than left to a
+  component.
+- **Cross-tool memory** — `lib/aboutme.ts`, applied at the single point every
+  assistant feature leaves by, so it cannot reach some tools and not others.
+
+### Privacy is architectural, with one nuance worth stating first
+
+**Semester never asks for an LMS or SSO password.** There is no credential
+scraping anywhere in the codebase, and that is a structural choice rather than a
+policy promise.
+
+The nuance, because a university compliance office will find it and it is better
+to say it: **a Canvas personal access token is account-equivalent.** It can read
+a student's messages and grades and it can write. `lib/canvas.ts` says so in its
+own docstring rather than glossing it. What the app does about it:
+
+- Only ever issues `GET` under `/api/v1/`.
+- The token travels in a request **body**, never a query string — a query string
+  is the part of a request that lands in every log on the way.
+- **The forwarder refuses anything that is not a `GET` under `/api/v1/`**, so a
+  bug in the client cannot become a write. Enforced server-side in
+  `supabase/functions/canvas/index.ts`, not only by convention.
+
+Also real: a documented data-retention decision (`RETENTION.md`), a data-access
+audit log (a migration, not a plan), and a written incident-response runbook
+(`SECURITY.md`).
+
+---
+
+## Not validated — there is no evidence, here or anywhere
+
+This is the honest half, and it is the half worth leading with.
+
+| Claim | Status |
+| --- | --- |
+| **Users** | **Zero.** No real user has ever used this product. |
+| **Revenue** | **Zero.** |
+| **Retention** | **No data.** Not a weak number — no number. |
+| **Willingness to pay** | **Never tested.** No paywall experiment, no pricing interviews. |
+| **LTV:CAC ≈ 17x** | **Modeled, not observed.** Every input is an assumption. |
+| **Year-2 break-even** | **Modeled.** Depends on the above. |
+| **Ambassador growth engine (60–270x organic ratio)** | **Never run once**, at any campus, with any ambassador. |
+| **Payment processing** | **Built and accepted once; not validated.** The original row here ("does not exist, no payment code in `app/src`") was true on 21 September and is no longer. Checkout, Stripe portal, cancellation and the webhook exist (`app/src/lib/membership.ts`, `components/MembershipPanel.tsx`, `supabase/functions/billing-*`), and one live $7.99 monthly Plus checkout, receipt, entitlement and end-of-period cancellation passed on 3 October ([`docs/evidence/BILLING-LIVE-ACCEPTANCE-2026-10-03.md`](docs/evidence/BILLING-LIVE-ACCEPTANCE-2026-10-03.md)). That purchase was the acceptance run, not a customer, so it is not a willingness-to-pay observation. Not exercised: the $59 annual charge, a refund, a failed renewal, a dispute, tax in a registered jurisdiction. The record states checkout is held by the governed acquisition control and that it is not authorisation to enable it; Pro and institution billing are not on sale. Re-check with `ls supabase/functions \| grep billing`. |
+| **Unit-cost model under real usage** | **Untested.** The shared AI key is metered at 60 generations per account per month; nobody has ever hit that ceiling because nobody has ever used it. |
+| **Deploy safety** | **No staging environment.** CI passing is not the same as a deploy being gated on it. |
+| **Trademark** | **"Semester" is likely unregistrable** — *merely descriptive* under 15 U.S.C. §1052(e)(1) for software that plans a semester. The clearance search has not been run. |
+| **University IP position** | **Unresolved.** The Vanderbilt CTTC conversation is drafted and unsent. |
+| **Internal financial consistency** | **Figures disagree** across founder-facing documents — licence fee, premium price, infrastructure cost per user, and conversion rate each have two values. |
+
+---
+
+## The one sentence to fix before the deck goes out
+
+The analysis recommends leading with *"the only free, **unlimited**,
+workload-aware planner."* The first half is defensible and the word *unlimited*
+is not, flat, because this product meters:
+
+> `supabase/functions/claude/index.ts` — the shared AI key is capped at **60
+> generations per account per month**; a student's own key removes the cap.
+
+The honest form is stronger anyway, because it survives a competitor's
+screenshot:
+
+> **The planner is free and unlimited** — courses, deadlines, workload fitting,
+> grades, calendar, sharing. No cap, no tier, no paywall.
+> **The shared AI key is free and generous** — 60 syllabus-scale generations a
+> month, and your own key removes the limit.
+
+Rivals that paywall the syllabus upload itself cannot say either half.
+
+---
+
+## What would move a row from right to left, cheapest first
+
+1. **Ten real users with a 30-day retention number.** The single highest-value
+   missing fact, the one an investor asks for first, and — this is the part
+   worth knowing before anybody scopes work for it — **it needs no engineering
+   at all.**
+
+   `ANALYTICS.md` already defines the three figures, already holds the query
+   for each, and already reasons about a pilot of exactly ten people. The
+   table, the marks and the one call site that writes them are built and
+   shipped. Nothing is missing from the instrument; what is missing is people
+   walking through it.
+
+   So this item is not a sprint. It is ten students and thirty days, and the
+   number falls out of a query somebody runs by hand — which `ANALYTICS.md`
+   says is deliberately a person's job, with no dashboard and no third party
+   holding a copy.
+2. **A soft paywall or 20–30 structured pricing interviews.** Converts
+   *willingness to pay* from assumption to observation.
+3. **Two or three ambassadors at one campus, with tracked installs.** Tests the
+   growth engine the whole financial model rests on.
+4. **Branch protection: require branches to be up to date before merging.** Sixty
+   seconds. Three separate collisions landed on `main` during this review alone,
+   each one green on its own branch.
+5. **Finish the billing evidence, before charging anyone.** Collection now
+   exists and passed one live acceptance purchase (see the payment row above).
+   What is missing is the rest of the lifecycle (annual, refund, failed renewal,
+   dispute, tax) and approval from the acquisition control to turn checkout on.
+
+The first item is worth more than the other four combined.
+
+---
+
+## What this document is not
+
+It is not a third-party audit. Every figure here is self-measured, which is
+exactly why each one ships with the command that reproduces it and the commit it
+was taken on. Anyone who doubts a number in the left column can run one line and
+settle it; nothing in the right column requires trust at all, because it claims
+nothing.

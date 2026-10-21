@@ -1,0 +1,6 @@
+{
+  "name": "Semester — The Unified Education Operating System",
+  "description": "The unified education operating system connecting students, faculty, advisors, and campus life with intelligent academic planning, coursework, and career evidence.",
+  "permissions": [],
+  "capabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

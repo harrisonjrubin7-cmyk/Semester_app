@@ -1,0 +1,135 @@
+# The contrast sweep, on a schedule.
+#
+# Not part of `ci.yml`, and the reasons are worth stating because "why is this
+# not a required check" is the first question anyone will have:
+#
+#   It needs a browser and a running dev server, and takes about half an hour.
+#   Gating every pull request on that would cost more than it catches — the
+#   failures it finds are palette and stylesheet mistakes, which arrive far
+#   more slowly than pull requests do.
+#
+#   It measures what Chromium paints, so it needs the app running rather than
+#   compiled. `ci.yml` never starts the app.
+#
+# What it is for: `lib/contrast.test.ts` runs in CI over every accent-and-
+# ground pairing, but it compares tokens to tokens, and the failures that
+# matter most are not visible there. The search placeholder that shipped at
+# 0.00:1 — text and surface the same colour — passed every check this repo
+# had, because the two rules that produced it are each correct alone and only
+# meet when a browser composites them. See app/scripts/contrast-sweep.mjs.
+#
+# Nightly rather than hourly: a run costs half an hour of runner time and the
+# thing it watches for changes on the scale of a stylesheet edit.
+
+name: Contrast
+
+on:
+  schedule:
+    # 07:00 UTC, which is the quiet end of the day for this repo.
+    - cron: '0 7 * * *'
+  # So it can be run against a branch before merging something palette-shaped,
+  # rather than finding out the next morning.
+  workflow_dispatch:
+
+# One at a time. A second run would fight the first for port 5173.
+concurrency:
+  group: contrast
+  cancel-in-progress: false
+
+# The job token may read the repository and nothing else, unless a job says
+# otherwise below. Without this line every job gets the repository's default
+# token, which a Settings change can make read-write, and a compromised Action
+# or dependency runs with whatever that is. `supplychain.test.ts` requires
+# every workflow to declare this.
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    # A full run is ~33 minutes; this leaves room for a slow runner without
+    # letting a hung browser burn six hours.
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      # Playwright is installed here and not in `app/package.json`, which is
+      # deliberate: see `.claude/skills/run`. Every contributor would otherwise
+      # pay a browser download to run the unit tests. A scratch directory keeps
+      # it out of the project's tree exactly as the script's own instructions
+      # describe.
+      - name: Install playwright and a browser
+        run: |
+          mkdir -p /tmp/sweep && cd /tmp/sweep
+          echo '{"name":"sweep","private":true,"type":"module"}' > package.json
+          npm install --no-save playwright
+          npx --yes playwright install --with-deps chromium
+
+      # `npm run dev` rather than a built preview: the sweep was written and
+      # verified against the dev server, and a difference between the two would
+      # show up here as a finding nobody could reproduce locally.
+      - name: Start the app
+        working-directory: app
+        run: |
+          npm run dev > /tmp/vite.log 2>&1 &
+          timeout 120 bash -c 'until curl -sf http://localhost:5173 >/dev/null; do sleep 1; done'
+          echo "dev server up"
+
+      # The script exits non-zero on a finding *or* on a pass whose setup it
+      # could not confirm, so this step failing means one of those two and the
+      # log says which.
+      #
+      # `shell: bash` is what lets that be true. A step with no `shell:` runs
+      # as `bash -e {0}`, which has no `pipefail`, so the pipe into `tee` below
+      # reported `tee`'s status and the step was green on every night's run
+      # while the log said `FINDINGS: 159` (run of 3 October 2026). With the
+      # shell named GitHub runs `bash -eo pipefail`, and the script's exit code
+      # is the step's. `workflowshell.test.ts` holds every workflow to this.
+      - name: Sweep
+        shell: bash
+        working-directory: app
+        env:
+          SWEEP_PLAYWRIGHT: /tmp/sweep/node_modules/playwright
+        run: npm run sweep:contrast 2>&1 | tee /tmp/contrast.txt
+
+      # A minute on the same browser and the same dev server, so it rides here
+      # rather than paying for its own runner, its own install and its own
+      # thirty seconds of Vite. `if: always()` because a contrast finding above
+      # says nothing about button hierarchy and skipping this on that failure
+      # would mean one red night hides the other measurement entirely.
+      #
+      # What it watches: a row of four or more buttons with nothing ranked
+      # above it, and a screen offering more than one filled action at once.
+      # The second is what `COMPETITION.md` §8 left open — "the hierarchy is
+      # local rather than designed" — and it is invisible from inside any one
+      # section, which is why no unit test was ever going to find it.
+      - name: Walls
+        if: always()
+        shell: bash
+        working-directory: app
+        env:
+          SWEEP_PLAYWRIGHT: /tmp/sweep/node_modules/playwright
+        run: npm run sweep:walls 2>&1 | tee /tmp/walls.txt
+
+      # Kept whether the step passed or failed: a green run's coverage numbers
+      # are how you notice the sweep quietly measuring less than it used to.
+      - name: Keep the output
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: contrast-sweep
+          path: |
+            /tmp/contrast.txt
+            /tmp/walls.txt
+            /tmp/vite.log
+          retention-days: 30
